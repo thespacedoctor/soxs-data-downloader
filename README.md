@@ -34,7 +34,7 @@ Open `soxs-data-downloader.py`. The user settings block is at the top of the fil
 ```python
 ESO_USERNAME = None          # for example "your_eso_username"
 DATA_DIR = None              # for example "/data/soxs/raw"
-FRAME_CATEGORIES = None
+FRAME_CATEGORIES = ["SCIENCE", "CALIB", "ACQUISITION"]
 DEFAULT_START_NIGHT = None
 DEFAULT_END_NIGHT = None
 STORE_PASSWORD = True
@@ -50,7 +50,7 @@ A command-line flag always wins over the matching setting. The script checks eve
 | --- | --- | --- |
 | `ESO_USERNAME` | `--user` | Your ESO User Portal username. No default. |
 | `DATA_DIR` | `--data-dir` | The root folder of your local SOXS raw frames. The script expands `~` in the path. No default. |
-| `FRAME_CATEGORIES` | `--category` | A list of frame categories, for example `["SCIENCE", "CALIB"]`. `None` means all categories. |
+| `FRAME_CATEGORIES` | `--category` | A list of frame categories, for example `["SCIENCE", "CALIB"]`. The default is `["SCIENCE", "CALIB", "ACQUISITION"]`. `None` means all categories. |
 | `DEFAULT_START_NIGHT` | `--start-night` | First UT night to consider, as `"YYYY-MM-DD"`. `None` leaves the start open. |
 | `DEFAULT_END_NIGHT` | `--end-night` | Last UT night to consider (inclusive), as `"YYYY-MM-DD"`. `None` leaves the end open. |
 | `STORE_PASSWORD` | None | `True` keeps your ESO password in the system keyring. |
