@@ -5,3 +5,4 @@ requests
 packaging
 docopt
 fundamentals
+tqdm

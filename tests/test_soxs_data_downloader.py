@@ -30,9 +30,22 @@ BLANK_SETTINGS = {
     "UNZIP_FRAMES": False,
     "MAX_DOWNLOAD_ATTEMPTS": 5,
     "RETRY_DELAY_STEP_SECONDS": 30,
+    "LOG_LEVEL": "WARNING",
 }
 ATTEMPTS = 5
 DELAY_STEP = 30
+
+
+@pytest.fixture(autouse=True)
+def restore_astroquery_log():
+    # main() CHANGES ASTROQUERY'S PROCESS-WIDE LOGGER
+    astroqueryLog = dsd.astroqueryLog
+    saved = (astroqueryLog.level, astroqueryLog.disabled, astroqueryLog.propagate, list(astroqueryLog.handlers))
+    yield
+    astroqueryLog.setLevel(saved[0])
+    astroqueryLog.disabled = saved[1]
+    astroqueryLog.propagate = saved[2]
+    astroqueryLog.handlers[:] = saved[3]
 
 
 @pytest.fixture(autouse=True)
@@ -172,7 +185,50 @@ def test_summarise_says_none_for_an_empty_table():
     assert dsd.summarise(make_archive_table([])) == "none"
 
 
-def test_download_calls_retrieve_data_once_per_night_folder(tmp_path, log):
+def test_find_present_keeps_only_archive_rows_on_disk():
+    # ARRANGE
+    archiveTable = make_archive_table([
+        ("SOXS.A", "CALIB", "2026-01-11T09:00:00"),
+        ("SOXS.B", "SCIENCE", "2026-01-11T10:00:00"),
+    ])
+
+    # ACT
+    present = dsd.find_present(archiveTable, {"SOXS.B", "SOXS.Z"})
+
+    # ASSERT
+    assert list(present["dp_id"]) == ["SOXS.B"]
+
+
+@pytest.mark.parametrize(
+    ("presentCount", "archiveCount", "expected"),
+    [
+        (947, 1000, "94.7%"),
+        (9999, 10000, "99.9%"),
+        (0, 5, "0.0%"),
+        (5, 5, "100.0%"),
+        (1, 3, "33.3%"),
+    ],
+)
+def test_percent_downloaded_rounds_down_to_one_decimal(presentCount, archiveCount, expected):
+    assert dsd.percent_downloaded(presentCount, archiveCount) == expected
+
+
+def test_percent_downloaded_rejects_an_empty_archive():
+    with pytest.raises(ValueError, match="empty"):
+        dsd.percent_downloaded(0, 0)
+
+
+def test_report_writes_to_stderr_only(capsys):
+    # ACT
+    dsd.report("Archive holds 3 frames")
+
+    # ASSERT
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "Archive holds 3 frames\n"
+
+
+def test_download_calls_retrieve_data_once_per_frame_into_its_night_folder(tmp_path, log):
     # ARRANGE
     eso = mock.Mock()
     missing = make_archive_table([
@@ -185,13 +241,139 @@ def test_download_calls_retrieve_data_once_per_night_folder(tmp_path, log):
     dsd.download_missing(eso, missing, tmp_path, ATTEMPTS, DELAY_STEP, log)
 
     # ASSERT
-    eso.retrieve_data.assert_has_calls(
-        [
-            mock.call(["SOXS.A", "SOXS.B"], destination=str(tmp_path / "2026-01-26"), unzip=False),
-            mock.call(["SOXS.C"], destination=str(tmp_path / "2026-01-27"), unzip=False),
-        ],
-        any_order=True,
-    )
+    assert eso.retrieve_data.call_args_list == [
+        mock.call(["SOXS.A"], destination=str(tmp_path / "2026-01-26"), unzip=False),
+        mock.call(["SOXS.B"], destination=str(tmp_path / "2026-01-26"), unzip=False),
+        mock.call(["SOXS.C"], destination=str(tmp_path / "2026-01-27"), unzip=False),
+    ]
+
+
+def test_download_night_reports_progress_once_per_frame(tmp_path, log):
+    # ARRANGE
+    eso = mock.Mock()
+    progress = mock.Mock()
+
+    # ACT
+    dsd.download_night(eso, "2026-01-26", ["SOXS.A", "SOXS.B", "SOXS.C"], tmp_path, ATTEMPTS, DELAY_STEP, log, progress=progress)
+
+    # ASSERT
+    assert progress.call_args_list == [mock.call(1)] * 3
+
+
+def test_download_night_retry_resumes_at_the_frame_that_dropped(tmp_path, log):
+    # ARRANGE
+    def drop_on_second_frame(ids, destination, unzip):
+        if eso.retrieve_data.call_count == 2:
+            raise dsd.requests.exceptions.ConnectionError("reset")
+
+    eso = mock.Mock()
+    eso.retrieve_data.side_effect = drop_on_second_frame
+    progress = mock.Mock()
+
+    # ACT
+    with mock.patch.object(dsd.time, "sleep"):
+        dsd.download_night(eso, "2026-01-26", ["SOXS.A", "SOXS.B", "SOXS.C"], tmp_path, ATTEMPTS, DELAY_STEP, log, progress=progress)
+
+    # ASSERT
+    requested = [call.args[0] for call in eso.retrieve_data.call_args_list]
+    assert requested == [["SOXS.A"], ["SOXS.B"], ["SOXS.B"], ["SOXS.C"]]
+    assert progress.call_count == 3
+
+
+def test_download_night_keeps_retrying_while_each_try_makes_progress(tmp_path, log):
+    # ARRANGE
+    # EVERY FRAME AFTER THE FIRST DROPS ONCE, SO A FIXED BUDGET OF 2 TRIES WOULD ABANDON THE NIGHT
+    seen = set()
+
+    def drop_each_new_frame_once(ids, destination, unzip):
+        frameId = ids[0]
+        if frameId != "SOXS.A" and frameId not in seen:
+            seen.add(frameId)
+            raise dsd.requests.exceptions.ConnectionError("reset")
+
+    eso = mock.Mock()
+    eso.retrieve_data.side_effect = drop_each_new_frame_once
+    progress = mock.Mock()
+
+    # ACT
+    with mock.patch.object(dsd.time, "sleep") as sleep:
+        dsd.download_night(eso, "2026-01-26", ["SOXS.A", "SOXS.B", "SOXS.C", "SOXS.D"], tmp_path, 2, DELAY_STEP, log, progress=progress)
+
+    # ASSERT
+    assert progress.call_count == 4
+    assert sleep.call_args_list == [mock.call(DELAY_STEP)] * 3
+
+
+def test_download_night_gives_up_after_tries_in_a_row_without_progress(tmp_path, log):
+    # ARRANGE
+    def fetch_first_then_always_drop(ids, destination, unzip):
+        if ids[0] != "SOXS.A":
+            raise dsd.requests.exceptions.ConnectionError("reset")
+
+    eso = mock.Mock()
+    eso.retrieve_data.side_effect = fetch_first_then_always_drop
+
+    # ACT
+    with mock.patch.object(dsd.time, "sleep"), pytest.raises(dsd.requests.ConnectionError):
+        dsd.download_night(eso, "2026-01-26", ["SOXS.A", "SOXS.B"], tmp_path, 3, DELAY_STEP, log)
+
+    # ASSERT
+    requested = [call.args[0] for call in eso.retrieve_data.call_args_list]
+    assert requested == [["SOXS.A"], ["SOXS.B"], ["SOXS.B"], ["SOXS.B"]]
+
+
+@pytest.fixture
+def visible_bars(monkeypatch):
+    """Make download_missing draw its bar into a buffer, even though pytest has no terminal, and keep each bar."""
+    import io
+
+    from tqdm import tqdm as realTqdm
+
+    bars = []
+
+    def make_bar(**kwargs):
+        bar = realTqdm(**{**kwargs, "disable": False, "file": io.StringIO()})
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(dsd, "tqdm", make_bar)
+    return bars
+
+
+def test_download_progress_bar_counts_every_missing_frame(tmp_path, log, visible_bars):
+    # ARRANGE
+    eso = mock.Mock()
+    missing = make_archive_table([
+        ("SOXS.A", "CALIB", "2026-01-26T20:00:00"),
+        ("SOXS.B", "CALIB", "2026-01-26T21:00:00"),
+        ("SOXS.C", "SCIENCE", "2026-01-27T20:00:00"),
+    ])
+
+    # ACT
+    dsd.download_missing(eso, missing, tmp_path, ATTEMPTS, DELAY_STEP, log)
+
+    # ASSERT
+    (bar,) = visible_bars
+    assert bar.total == 3
+    assert bar.n == 3
+
+
+def test_download_progress_bar_still_reaches_the_total_when_a_night_fails(tmp_path, log, visible_bars):
+    # ARRANGE
+    eso = mock.Mock()
+    eso.retrieve_data.side_effect = [dsd.RemoteServiceError("server error"), None]
+    missing = make_archive_table([
+        ("SOXS.A", "CALIB", "2026-01-26T20:00:00"),
+        ("SOXS.B", "CALIB", "2026-01-26T21:00:00"),
+        ("SOXS.C", "SCIENCE", "2026-01-27T20:00:00"),
+    ])
+
+    # ACT
+    dsd.download_missing(eso, missing, tmp_path, ATTEMPTS, DELAY_STEP, log)
+
+    # ASSERT
+    (bar,) = visible_bars
+    assert bar.n == 3
     assert eso.retrieve_data.call_count == 2
 
 
@@ -1402,3 +1584,129 @@ def test_script_run_directly_prints_the_help_text():
     assert result.returncode == 0
     assert "Usage:" in result.stdout
     assert "--data-dir=<path>" in result.stdout
+
+
+def test_main_reports_archive_disk_and_missing_counts_at_the_start(tmp_path, capsys, fresh_fundamentals_logger):
+    # ARRANGE
+    (tmp_path / "SOXS.A.fits").touch()
+    eso = make_eso(make_archive_table([
+        ("SOXS.A", "CALIB", "2026-01-27T09:00:00"),
+        ("SOXS.B", "SCIENCE", "2026-01-27T20:00:00"),
+    ]))
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    errLines = capsys.readouterr().err.splitlines()
+    assert "Archive holds 2 frames (CALIB=1, SCIENCE=1)" in errLines
+    assert "Already on disk: 1 frames (CALIB=1), 50.0% downloaded" in errLines
+    assert "1 frames are missing locally (SCIENCE=1)" in errLines
+
+
+def test_main_hides_info_log_lines_by_default(tmp_path, capsys, fresh_fundamentals_logger):
+    # ARRANGE
+    eso = make_eso(make_archive_table([("SOXS.B", "SCIENCE", "2026-01-27T20:00:00")]))
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    assert "Indexing local frames" not in capsys.readouterr().err
+
+
+def test_main_shows_info_log_lines_when_log_level_is_info(tmp_path, capsys, monkeypatch, fresh_fundamentals_logger):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "LOG_LEVEL", "info")
+    eso = make_eso(make_archive_table([("SOXS.B", "SCIENCE", "2026-01-27T20:00:00")]))
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    assert "Indexing local frames" in capsys.readouterr().err
+
+
+def test_main_sets_the_astroquery_logger_to_the_chosen_level(tmp_path, fresh_fundamentals_logger):
+    # ARRANGE
+    dsd.astroqueryLog.setLevel("INFO")
+    eso = make_eso(make_archive_table([]))
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    assert dsd.astroqueryLog.getEffectiveLevel() == logging.WARNING
+
+
+@pytest.mark.parametrize("value", ["LOUD", "", 20, None])
+def test_main_rejects_an_invalid_log_level_setting(tmp_path, monkeypatch, value):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "LOG_LEVEL", value)
+
+    # ACT / ASSERT
+    with mock.patch.object(dsd, "Eso") as esoClass, pytest.raises(SystemExit, match="LOG_LEVEL"):
+        dsd.main(cli("--data-dir", str(tmp_path), "--user", "dave"))
+    esoClass.assert_not_called()
+
+
+def test_main_reports_an_empty_archive_and_downloads_nothing(tmp_path, capsys, fresh_fundamentals_logger):
+    # ARRANGE
+    eso = make_eso(make_archive_table([]))
+
+    # ACT
+    status = run_main(eso, tmp_path)
+
+    # ASSERT
+    err = capsys.readouterr().err
+    assert "Archive holds 0 frames" in err
+    assert "Already on disk" not in err
+    eso.retrieve_data.assert_not_called()
+    assert status == 0
+
+
+def test_main_shows_each_astroquery_warning_once_on_stderr(tmp_path, capsys, fresh_fundamentals_logger):
+    # ARRANGE
+    eso = make_eso(make_archive_table([]))
+    eso.query_main.side_effect = lambda *args, **kwargs: dsd.astroqueryLog.warning("Access denied to SOXS.A")
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    captured = capsys.readouterr()
+    assert captured.err.count("Access denied to SOXS.A") == 1
+    assert "Access denied" not in captured.out
+
+
+def test_main_hides_astroquery_info_lines_by_default(tmp_path, capsys, fresh_fundamentals_logger):
+    # ARRANGE
+    eso = make_eso(make_archive_table([]))
+    eso.query_main.side_effect = lambda *args, **kwargs: dsd.astroqueryLog.info("Downloading file 1/1")
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    captured = capsys.readouterr()
+    assert "Downloading file" not in captured.err + captured.out
+
+
+def test_dry_run_stdout_holds_only_the_listing_at_info_level(tmp_path, capsys, monkeypatch, fresh_fundamentals_logger):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "LOG_LEVEL", "INFO")
+    eso = make_eso()
+
+    def log_and_return_table(*args, **kwargs):
+        dsd.astroqueryLog.info("Authenticating dave on 'www.eso.org' ...")
+        return make_archive_table([("SOXS.B", "SCIENCE", "2026-01-27T20:00:00")])
+
+    eso.query_main.side_effect = log_and_return_table
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    captured = capsys.readouterr()
+    assert captured.out == "SOXS.B\tSCIENCE\t2026-01-27\n"
+    assert "Authenticating dave" in captured.err

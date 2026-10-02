@@ -4,3 +4,6 @@
 
 - **FEATURE**: Initial release: settings block, docopt command line, category filter, night range, retries on lost connections, and keyring password storage.
 - **ENHANCEMENT**: Downloaded frames stay compressed by default; `--unzip` or `UNZIP_FRAMES = True` unzips them.
+- **ENHANCEMENT**: Quiet output by default: new `LOG_LEVEL` setting (default `"WARNING"`), a start-of-run summary of archive, on-disk, and missing frames, and a `tqdm` progress bar; frames now download one at a time.
+- **ENHANCEMENT**: `MAX_DOWNLOAD_ATTEMPTS` now counts tries in a row that download no frame, so a long night with scattered connection drops is no longer abandoned.
+- **FIXED**: astroquery warnings and errors (for example "Access denied") were hidden, and its INFO lines went to stdout; they now go to stderr at the chosen `LOG_LEVEL`.

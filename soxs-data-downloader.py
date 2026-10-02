@@ -10,6 +10,11 @@ in any subfolder. New frames go into one folder per night, named ``YYYY-MM-DD``
 after the UT date 12 hours before the observation. Downloaded frames stay
 compressed (``.fits.Z``) unless you pass ``--unzip``.
 
+Each run starts by reporting how many frames the archive holds, how many are
+already on disk (with the percentage downloaded) and how many are missing. A
+progress bar follows the download. Other log lines are hidden unless
+``LOG_LEVEL`` is lowered to ``"INFO"`` or ``"DEBUG"``.
+
 You can set your ESO username, the data folder and the other defaults in the
 settings block at the top of this script. A command-line flag always overrides
 the matching setting. The ESO password is asked for once and then kept in the
@@ -52,8 +57,11 @@ from typing import Any
 
 import requests
 from astropy.table import Table
+from astroquery import log as astroqueryLog
 from astroquery.eso import Eso
 from astroquery.exceptions import RemoteServiceError
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 # ---------------- USER SETTINGS: EDIT THESE ----------------
 ESO_USERNAME = None          # e.g. "your_eso_username"; --user overrides
@@ -65,6 +73,7 @@ STORE_PASSWORD = True        # keep ESO password in the system keyring
 UNZIP_FRAMES = False         # True = unzip downloaded frames; --unzip turns this on for one run
 MAX_DOWNLOAD_ATTEMPTS = 5
 RETRY_DELAY_STEP_SECONDS = 30
+LOG_LEVEL = "WARNING"        # "DEBUG", "INFO", "WARNING" or "ERROR"; the frame counts and progress bar always show
 # -----------------------------------------------------------
 
 SCRIPT_NAME = "soxs-data-downloader.py"
@@ -72,6 +81,7 @@ MIN_ASTROQUERY_VERSION = "0.4.12.dev0"
 INSTRUMENT = "SOXS"
 ARCHIVE_COLUMNS = ["dp_id", "dp_cat", "date_obs"]
 FRAME_CATEGORY_CHOICES = ("SCIENCE", "CALIB", "ACQUISITION", "TECHNICAL", "TEST", "SIMULATION", "OTHER")
+LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR")
 FRAME_SUFFIXES = (".fits.Z", ".fits.gz", ".fits")
 NIGHT_ROLLOVER = timedelta(hours=12)
 ARCHIVE_FILTER_MARGIN = timedelta(hours=1)
@@ -198,6 +208,64 @@ def find_missing(archiveTable: Table, localIds: set[str]) -> Table:
     """
     isMissing = [str(dpId) not in localIds for dpId in archiveTable["dp_id"]]
     return archiveTable[isMissing]
+
+
+def find_present(archiveTable: Table, localIds: set[str]) -> Table:
+    """*return the archive rows that are already on disk*
+
+    **Key Arguments:**
+
+    - ``archiveTable`` -- the archive rows, with a ``dp_id`` column
+    - ``localIds`` -- the ``dp_id`` values found on disk
+
+    **Return:**
+
+    - ``presentTable`` -- the rows of ``archiveTable`` whose ``dp_id`` is in ``localIds``
+
+    **Usage:**
+
+        presentTable = find_present(archiveTable, localIds)
+    """
+    isPresent = [str(dpId) in localIds for dpId in archiveTable["dp_id"]]
+    return archiveTable[isPresent]
+
+
+def percent_downloaded(presentCount: int, archiveCount: int) -> str:
+    """*return the share of archive frames already on disk, as text*
+
+    The value is rounded down, so ``100.0%`` only shows when nothing is missing.
+
+    **Key Arguments:**
+
+    - ``presentCount`` -- the number of archive frames on disk
+    - ``archiveCount`` -- the number of frames in the archive; a ``ValueError`` is raised if it is 0
+
+    **Return:**
+
+    - ``percent`` -- for example ``94.7%``
+
+    **Usage:**
+
+        percent = percent_downloaded(947, 1000)  # "94.7%"
+    """
+    if archiveCount <= 0:
+        raise ValueError("cannot give a percentage of an empty archive")
+    tenthsOfAPercent = presentCount * 1000 // archiveCount
+    return f"{tenthsOfAPercent // 10}.{tenthsOfAPercent % 10}%"
+
+
+def report(message: str) -> None:
+    """*write a status line to stderr whatever the log level, without breaking a progress bar*
+
+    **Key Arguments:**
+
+    - ``message`` -- the line to show
+
+    **Usage:**
+
+        report("Archive holds 3 frames")
+    """
+    tqdm.write(message, file=sys.stderr)
 
 
 def night_folder(dateObs: str) -> str:
@@ -340,12 +408,14 @@ def download_night(
     log: logging.Logger,
     *,
     unzip: bool = False,
+    progress: Callable[[int], Any] | None = None,
 ) -> None:
-    """*download the frames of one night into ``dataDir/night``*
+    """*download the frames of one night into ``dataDir/night``, one frame at a time*
 
     If the connection drops, wait and try again with only the frames that are not
-    on disk yet, up to ``maxAttempts`` tries in total. The last error, or any error
-    that is not in ``RETRYABLE_ERRORS``, is raised.
+    downloaded or on disk yet. ``maxAttempts`` counts the tries in a row that fetch
+    no frame; a try that fetched frames before the drop starts the count again. The
+    last error, or any error that is not in ``RETRYABLE_ERRORS``, is raised.
 
     **Key Arguments:**
 
@@ -353,32 +423,41 @@ def download_night(
     - ``night`` -- the night folder name, ``YYYY-MM-DD``
     - ``ids`` -- the ``dp_id`` values to download
     - ``dataDir`` -- the root data folder
-    - ``maxAttempts`` -- tries in total before the error is raised
-    - ``retryDelayStep`` -- seconds to wait after the first failure; the wait grows by this much after each further one
+    - ``maxAttempts`` -- tries in a row without progress before the error is raised
+    - ``retryDelayStep`` -- seconds to wait after the first failure; the wait grows by this much after each further one without progress
     - ``log`` -- the logger
     - ``unzip`` -- unzip the frames after download; ``False`` keeps them compressed
+    - ``progress`` -- called with ``1`` after each frame is fetched, for example a progress bar's ``update``
 
     **Usage:**
 
         download_night(eso, "2026-01-26", ["SOXS.A"], "/data/soxs/raw", 5, 30, log)
     """
     nightDir = Path(dataDir) / night
-    remaining = ids
-    for attempt in range(1, maxAttempts + 1):
+    remaining = list(ids)
+    failures = 0
+    while True:
+        fetched = 0
         try:
-            eso.retrieve_data(remaining, destination=str(nightDir), unzip=unzip)
+            for frameId in remaining:
+                eso.retrieve_data([frameId], destination=str(nightDir), unzip=unzip)
+                fetched += 1
+                if progress is not None:
+                    progress(1)
             return
         except RETRYABLE_ERRORS as error:
-            if attempt == maxAttempts:
+            # A TRY THAT FETCHED FRAMES BEFORE THE DROP STARTS A NEW RUN OF ATTEMPTS
+            failures = 1 if fetched else failures + 1
+            if failures >= maxAttempts:
                 raise
             onDisk = index_local_frames(nightDir) if nightDir.is_dir() else set()
-            remaining = [frameId for frameId in ids if frameId not in onDisk]
+            remaining = [frameId for frameId in remaining[fetched:] if frameId not in onDisk]
             if not remaining:
                 return
-            delay = retryDelayStep * attempt
+            delay = retryDelayStep * failures
             log.warning(
                 "Night %s: connection lost (%s). Retrying %d frames in %s s (attempt %d/%d).",
-                night, error, len(remaining), delay, attempt + 1, maxAttempts,
+                night, error, len(remaining), delay, failures + 1, maxAttempts,
             )
             time.sleep(delay)
 
@@ -397,7 +476,8 @@ def download_missing(
 
     A night that still fails after ``download_night`` has retried it is logged and
     the next night is tried. The caller finds the frames that did not arrive by
-    indexing the local tree again.
+    indexing the local tree again. A progress bar on stderr counts the frames; it
+    is hidden when stderr is not a terminal. Log lines are routed around the bar.
 
     **Key Arguments:**
 
@@ -419,13 +499,20 @@ def download_missing(
     for row in missingTable:
         idsByNight[night_folder(row["date_obs"])].append(str(row["dp_id"]))
 
-    for index, night in enumerate(sorted(idsByNight), 1):
-        ids = idsByNight[night]
-        log.info("Night %s (%d/%d): downloading %d frames", night, index, len(idsByNight), len(ids))
-        try:
-            download_night(eso, night, ids, dataDir, maxAttempts, retryDelayStep, log, unzip=unzip)
-        except DOWNLOAD_ERRORS as error:
-            log.error("Night %s: download stopped (%s). Continuing with the next night.", night, error)
+    framesThroughNight = 0
+    bar = tqdm(total=len(missingTable), unit="frame", desc="Downloading", file=sys.stderr, disable=None)
+    with bar, logging_redirect_tqdm():
+        for index, night in enumerate(sorted(idsByNight), 1):
+            ids = idsByNight[night]
+            framesThroughNight += len(ids)
+            bar.set_postfix_str(f"night {night} ({index}/{len(idsByNight)})")
+            log.debug("Night %s (%d/%d): downloading %d frames", night, index, len(idsByNight), len(ids))
+            try:
+                download_night(eso, night, ids, dataDir, maxAttempts, retryDelayStep, log, unzip=unzip, progress=bar.update)
+            except DOWNLOAD_ERRORS as error:
+                log.error("Night %s: download stopped (%s). Continuing with the next night.", night, error)
+            # COUNT THE FRAMES OF A FAILED OR SHORTENED NIGHT SO THE BAR STILL ENDS AT ITS TOTAL
+            bar.update(framesThroughNight - bar.n)
 
 
 def summarise(table: Table) -> str:
@@ -657,6 +744,47 @@ def _check_bool(value: Any) -> bool:
     return value
 
 
+def _check_log_level(value: Any) -> str:
+    """*validate a log level name and put it in upper case*
+
+    **Key Arguments:**
+
+    - ``value`` -- one of ``LOG_LEVEL_CHOICES``, in any case
+
+    **Return:**
+
+    - ``level`` -- the upper-case level name
+    """
+    if not isinstance(value, str) or value.strip().upper() not in LOG_LEVEL_CHOICES:
+        raise ValueError(f"must be one of {', '.join(LOG_LEVEL_CHOICES)}")
+    return value.strip().upper()
+
+
+def _route_astroquery_log(level: str) -> None:
+    """*send astroquery's log records through the root handlers at the chosen level*
+
+    ``fundamentals`` disables every logger that exists when it sets up logging,
+    which hides astroquery's warnings and errors (for example "Access denied").
+    astroquery's own handler also writes INFO to stdout, which would mix with the
+    ``--dry-run`` listing. So the logger is enabled again, given the chosen level,
+    and stripped of its own handler; its records then reach the root handlers on
+    stderr once.
+
+    **Key Arguments:**
+
+    - ``level`` -- the upper-case log level name
+
+    **Return:**
+
+    - none; astroquery's logger is changed in place
+    """
+    astroqueryLog.disabled = False
+    astroqueryLog.setLevel(level)
+    astroqueryLog.propagate = True
+    for handler in list(astroqueryLog.handlers):
+        astroqueryLog.removeHandler(handler)
+
+
 def _log_to_stderr() -> None:
     """*move the console log handlers from stdout to stderr*
 
@@ -801,11 +929,11 @@ def query_archive(
         archiveTable = query_archive(eso, None, None, ("SCIENCE",), log)
     """
     if startNight or endNight:
-        log.info("Querying the ESO archive for %s raw frames from night %s to %s", INSTRUMENT, startNight or "the beginning", endNight or "now")
+        report(f"Querying the ESO archive for {INSTRUMENT} raw frames from night {startNight or 'the beginning'} to {endNight or 'now'}")
         columnFilters = tap_date_filter(night_bounds(startNight, endNight))
         archiveTable = eso.query_main(INSTRUMENT, columns=ARCHIVE_COLUMNS, authenticated=True, column_filters=columnFilters)
     else:
-        log.info("Querying the ESO archive for all %s raw frames", INSTRUMENT)
+        report(f"Querying the ESO archive for all {INSTRUMENT} raw frames")
         archiveTable = eso.query_main(INSTRUMENT, columns=ARCHIVE_COLUMNS, authenticated=True)
     if archiveTable is None:
         archiveTable = Table(names=ARCHIVE_COLUMNS)
@@ -830,7 +958,9 @@ def sync_archive(eso: Eso, options: Options, log: logging.Logger) -> int:
         status = sync_archive(eso, options, log)
     """
     archiveTable = query_archive(eso, options.startNight, options.endNight, options.categories, log)
-    log.info("Archive holds %d frames (%s)", len(archiveTable), summarise(archiveTable))
+    report(f"Archive holds {len(archiveTable)} frames ({summarise(archiveTable)})")
+    if len(archiveTable) == 0:
+        return 0
 
     log.info("Indexing local frames under %s", options.dataDir)
     try:
@@ -838,8 +968,10 @@ def sync_archive(eso: Eso, options: Options, log: logging.Logger) -> int:
     except OSError as error:
         log.error("Cannot read the local data folder, so nothing was downloaded: %s", error)
         return 1
+    present = find_present(archiveTable, localIds)
     missing = find_missing(archiveTable, localIds)
-    log.info("%d frames are missing locally (%s)", len(missing), summarise(missing))
+    report(f"Already on disk: {len(present)} frames ({summarise(present)}), {percent_downloaded(len(present), len(archiveTable))} downloaded")
+    report(f"{len(missing)} frames are missing locally ({summarise(missing)})")
 
     if options.dryRun:
         for row in missing:
@@ -877,7 +1009,7 @@ def _verify_download(missing: Table, options: Options, log: logging.Logger) -> i
         for dpId in stillMissing["dp_id"]:
             log.error("  %s", dpId)
         return 1
-    log.info("All %d missing frames downloaded", len(missing))
+    report(f"All {len(missing)} missing frames downloaded")
     return 0
 
 
@@ -898,17 +1030,19 @@ def main(arguments: dict[str, Any] | None = None) -> int:
     """
     from fundamentals import tools
 
+    logLevel = _checked(_check_log_level, LOG_LEVEL, "LOG_LEVEL")
     # SETUP THE COMMAND-LINE UTIL SETTINGS
     su = tools(
         arguments=arguments,
         docString=__doc__,
-        logLevel="INFO",
+        logLevel=logLevel,
         options_first=False,
         projectName=False,
         defaultSettingsFile=False,
     )
     arguments, _, log, _ = su.setup()
     _log_to_stderr()
+    _route_astroquery_log(logLevel)
 
     options = resolve_options(arguments)
     require_astroquery()

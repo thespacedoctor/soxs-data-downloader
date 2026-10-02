@@ -41,6 +41,7 @@ STORE_PASSWORD = True
 UNZIP_FRAMES = False         # True = unzip downloaded frames; --unzip turns this on for one run
 MAX_DOWNLOAD_ATTEMPTS = 5
 RETRY_DELAY_STEP_SECONDS = 30
+LOG_LEVEL = "WARNING"        # "DEBUG", "INFO", "WARNING" or "ERROR"
 ```
 
 A command-line flag always wins over the matching setting. The script checks every value in the same way, whether it comes from a flag or from the settings block.
@@ -54,8 +55,9 @@ A command-line flag always wins over the matching setting. The script checks eve
 | `DEFAULT_END_NIGHT` | `--end-night` | Last UT night to consider (inclusive), as `"YYYY-MM-DD"`. `None` leaves the end open. |
 | `STORE_PASSWORD` | None | `True` keeps your ESO password in the system keyring. |
 | `UNZIP_FRAMES` | `--unzip` | `True` unzips the downloaded frames. `False` keeps them compressed. The default is `False`. The flag can only turn unzipping on. |
-| `MAX_DOWNLOAD_ATTEMPTS` | None | The number of tries for each night before the script gives up on that night. Must be a whole number of 1 or more. |
+| `MAX_DOWNLOAD_ATTEMPTS` | None | The number of tries in a row that download no frame before the script gives up on that night. A try that downloads frames before the connection drops starts the count again. With `1`, the script never retries. Must be a whole number of 1 or more. |
 | `RETRY_DELAY_STEP_SECONDS` | None | The wait, in seconds, after the first failed try. The wait grows by this amount after each further failed try. Must be a finite number of 0 or more. |
+| `LOG_LEVEL` | None | How much the script writes to the log. Use `"DEBUG"`, `"INFO"`, `"WARNING"`, or `"ERROR"`, in any case. The default is `"WARNING"`, which hides the other log lines. The frame counts and the progress bar always show. |
 
 Notes:
 
@@ -109,11 +111,30 @@ You can also start the script directly.
 
 These examples assume you set `ESO_USERNAME` and `DATA_DIR` in the settings block. Run `python soxs-data-downloader.py --help` to see all options.
 
+## What the script shows
+
+At the start of every run, the script writes a summary to stderr. It does this at any `LOG_LEVEL`.
+
+```text
+Querying the ESO archive for all SOXS raw frames
+Archive holds 63335 frames (ACQUISITION=2029, CALIB=58514, SCIENCE=2792)
+Already on disk: 60000 frames (ACQUISITION=2000, CALIB=56000, SCIENCE=2000), 94.7% downloaded
+3335 frames are missing locally (ACQUISITION=29, CALIB=2514, SCIENCE=792)
+```
+
+- **Archive holds.** The frames in the archive that match your night range and categories.
+- **Already on disk.** The part of those frames that you already have. Frames outside your night range or categories are not counted. The percentage is rounded down, so `100.0%` shows only when no frame is missing.
+- **Missing locally.** The frames the script will download.
+
+If the archive holds no matching frames, the script stops after the first two lines.
+
+While the script downloads, a progress bar on stderr counts the downloaded frames and shows the current night. The script fetches the frames one at a time. The bar is hidden when stderr is not a terminal, for example when you run the script from cron or redirect its output to a file. When all frames arrive, the script ends with `All N missing frames downloaded`, where `N` is the number of frames it fetched.
+
 ## How frames are organised
 
 - **Night folders.** The script puts each new frame in a folder named `YYYY-MM-DD` inside the data folder. The name is the UT date 12 hours before the observation. For example, a frame observed at `2026-01-27T11:59:59.999` UT goes in `2026-01-26`.
 - **Present frames.** A frame counts as present if a `.fits`, `.fits.Z`, or `.fits.gz` file with its name exists anywhere under the data folder, in any subfolder. The script does not re-download it.
-- **Retries.** If the connection drops during a night, the script waits and tries again with only the frames that are not on disk. It makes up to `MAX_DOWNLOAD_ATTEMPTS` tries for each night. If a night still fails, the script logs the error and goes on to the next night.
+- **Retries.** If the connection drops during a night, the script waits and tries again, starting at the frame that dropped and skipping frames that are on disk. It gives up on the night after `MAX_DOWNLOAD_ATTEMPTS` tries in a row that download no frame; a try that downloads frames starts the count again. If a night still fails, the script logs the error and goes on to the next night.
 - **Compressed frames.** ESO serves the frames as `.fits.Z` files, and the script keeps them in this form by default. To unzip them, pass `--unzip` or set `UNZIP_FRAMES = True`. The flag can only turn unzipping on. Unzipping uses the `gunzip` command on your system. If `gunzip` is not available, astroquery shows a warning and leaves the files compressed. The script does not download compressed frames again, because they count as present.
 
 ## Troubleshooting
