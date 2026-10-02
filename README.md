@@ -38,6 +38,7 @@ FRAME_CATEGORIES = None
 DEFAULT_START_NIGHT = None
 DEFAULT_END_NIGHT = None
 STORE_PASSWORD = True
+UNZIP_FRAMES = False         # True = unzip downloaded frames; --unzip turns this on for one run
 MAX_DOWNLOAD_ATTEMPTS = 5
 RETRY_DELAY_STEP_SECONDS = 30
 ```
@@ -52,6 +53,7 @@ A command-line flag always wins over the matching setting. The script checks eve
 | `DEFAULT_START_NIGHT` | `--start-night` | First UT night to consider, as `"YYYY-MM-DD"`. `None` leaves the start open. |
 | `DEFAULT_END_NIGHT` | `--end-night` | Last UT night to consider (inclusive), as `"YYYY-MM-DD"`. `None` leaves the end open. |
 | `STORE_PASSWORD` | None | `True` keeps your ESO password in the system keyring. |
+| `UNZIP_FRAMES` | `--unzip` | `True` unzips the downloaded frames. `False` keeps them compressed. The default is `False`. The flag can only turn unzipping on. |
 | `MAX_DOWNLOAD_ATTEMPTS` | None | The number of tries for each night before the script gives up on that night. Must be a whole number of 1 or more. |
 | `RETRY_DELAY_STEP_SECONDS` | None | The wait, in seconds, after the first failed try. The wait grows by this amount after each further failed try. Must be a finite number of 0 or more. |
 
@@ -93,6 +95,12 @@ Replace a stored password that is wrong.
 python soxs-data-downloader.py --reenter-password
 ```
 
+Unzip the downloaded frames. They stay compressed (`.fits.Z`) by default.
+
+```bash
+python soxs-data-downloader.py --unzip
+```
+
 You can also start the script directly.
 
 ```bash
@@ -106,7 +114,7 @@ These examples assume you set `ESO_USERNAME` and `DATA_DIR` in the settings bloc
 - **Night folders.** The script puts each new frame in a folder named `YYYY-MM-DD` inside the data folder. The name is the UT date 12 hours before the observation. For example, a frame observed at `2026-01-27T11:59:59.999` UT goes in `2026-01-26`.
 - **Present frames.** A frame counts as present if a `.fits`, `.fits.Z`, or `.fits.gz` file with its name exists anywhere under the data folder, in any subfolder. The script does not re-download it.
 - **Retries.** If the connection drops during a night, the script waits and tries again with only the frames that are not on disk. It makes up to `MAX_DOWNLOAD_ATTEMPTS` tries for each night. If a night still fails, the script logs the error and goes on to the next night.
-- **Unzip.** The script asks astroquery to unzip the files it downloads.
+- **Compressed frames.** ESO serves the frames as `.fits.Z` files, and the script keeps them in this form by default. To unzip them, pass `--unzip` or set `UNZIP_FRAMES = True`. The flag can only turn unzipping on. Unzipping uses the `gunzip` command on your system. If `gunzip` is not available, astroquery shows a warning and leaves the files compressed. The script does not download compressed frames again, because they count as present.
 
 ## Troubleshooting
 

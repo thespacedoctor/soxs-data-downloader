@@ -27,6 +27,7 @@ BLANK_SETTINGS = {
     "DEFAULT_START_NIGHT": None,
     "DEFAULT_END_NIGHT": None,
     "STORE_PASSWORD": True,
+    "UNZIP_FRAMES": False,
     "MAX_DOWNLOAD_ATTEMPTS": 5,
     "RETRY_DELAY_STEP_SECONDS": 30,
 }
@@ -186,12 +187,46 @@ def test_download_calls_retrieve_data_once_per_night_folder(tmp_path, log):
     # ASSERT
     eso.retrieve_data.assert_has_calls(
         [
-            mock.call(["SOXS.A", "SOXS.B"], destination=str(tmp_path / "2026-01-26"), unzip=True),
-            mock.call(["SOXS.C"], destination=str(tmp_path / "2026-01-27"), unzip=True),
+            mock.call(["SOXS.A", "SOXS.B"], destination=str(tmp_path / "2026-01-26"), unzip=False),
+            mock.call(["SOXS.C"], destination=str(tmp_path / "2026-01-27"), unzip=False),
         ],
         any_order=True,
     )
     assert eso.retrieve_data.call_count == 2
+
+
+@pytest.mark.parametrize("unzip", [True, False])
+def test_download_passes_the_unzip_choice_to_retrieve_data(tmp_path, log, unzip):
+    # ARRANGE
+    eso = mock.Mock()
+    missing = make_archive_table([("SOXS.A", "CALIB", "2026-01-26T20:00:00")])
+
+    # ACT
+    dsd.download_missing(eso, missing, tmp_path, ATTEMPTS, DELAY_STEP, log, unzip=unzip)
+
+    # ASSERT
+    eso.retrieve_data.assert_called_once_with(["SOXS.A"], destination=str(tmp_path / "2026-01-26"), unzip=unzip)
+
+
+def test_download_retry_skips_a_frame_that_arrived_compressed(tmp_path, log):
+    # ARRANGE
+    nightDir = tmp_path / "2026-01-26"
+
+    def drop_after_first_frame(ids, destination, unzip):
+        if eso.retrieve_data.call_count == 1:
+            nightDir.mkdir()
+            (nightDir / "SOXS.A.fits.Z").touch()
+            raise dsd.requests.exceptions.ConnectionError("reset")
+
+    eso = mock.Mock()
+    eso.retrieve_data.side_effect = drop_after_first_frame
+
+    # ACT
+    with mock.patch.object(dsd.time, "sleep"):
+        dsd.download_night(eso, "2026-01-26", ["SOXS.A", "SOXS.B"], tmp_path, ATTEMPTS, DELAY_STEP, log)
+
+    # ASSERT
+    assert eso.retrieve_data.call_args_list[1] == mock.call(["SOXS.B"], destination=str(nightDir), unzip=False)
 
 
 def test_download_continues_with_next_night_when_one_night_raises(tmp_path, log):
@@ -233,7 +268,7 @@ def test_download_retries_a_dropped_night_with_only_the_frames_not_yet_on_disk(t
         dsd.download_missing(eso, missing, tmp_path, ATTEMPTS, DELAY_STEP, log)
 
     # ASSERT
-    assert eso.retrieve_data.call_args_list[1] == mock.call(["SOXS.B"], destination=str(nightDir), unzip=True)
+    assert eso.retrieve_data.call_args_list[1] == mock.call(["SOXS.B"], destination=str(nightDir), unzip=False)
     assert eso.retrieve_data.call_count == 2
     sleep.assert_called_once()
     log.warning.assert_called_once()
@@ -256,7 +291,7 @@ def test_download_gives_up_on_a_night_after_the_last_retry_and_continues(tmp_pat
 
     # ASSERT
     assert eso.retrieve_data.call_count == maxAttempts + 1
-    assert eso.retrieve_data.call_args_list[-1] == mock.call(["SOXS.B"], destination=str(tmp_path / "2026-01-27"), unzip=True)
+    assert eso.retrieve_data.call_args_list[-1] == mock.call(["SOXS.B"], destination=str(tmp_path / "2026-01-27"), unzip=False)
 
 
 def test_download_waits_a_growing_multiple_of_the_delay_step_between_attempts(tmp_path, log):
@@ -842,7 +877,7 @@ def test_options_are_built_from_the_command_line(tmp_path):
     # ARRANGE
     arguments = cli(
         "--user", "dave", "--data-dir", str(tmp_path), "--category", "science",
-        "--start-night", "2026-01-01", "--end-night", "2026-01-31", "--dry-run", "--reenter-password",
+        "--start-night", "2026-01-01", "--end-night", "2026-01-31", "--dry-run", "--reenter-password", "--unzip",
     )
 
     # ACT
@@ -858,6 +893,7 @@ def test_options_are_built_from_the_command_line(tmp_path):
         dryRun=True,
         reenterPassword=True,
         storePassword=True,
+        unzip=True,
         maxAttempts=5,
         retryDelayStep=30,
     )
@@ -871,6 +907,7 @@ def test_options_fall_back_to_the_settings_block(tmp_path, monkeypatch):
     monkeypatch.setattr(dsd, "DEFAULT_START_NIGHT", "2026-02-01")
     monkeypatch.setattr(dsd, "DEFAULT_END_NIGHT", "2026-02-28")
     monkeypatch.setattr(dsd, "STORE_PASSWORD", False)
+    monkeypatch.setattr(dsd, "UNZIP_FRAMES", True)
     monkeypatch.setattr(dsd, "MAX_DOWNLOAD_ATTEMPTS", 3)
     monkeypatch.setattr(dsd, "RETRY_DELAY_STEP_SECONDS", 10)
 
@@ -887,6 +924,7 @@ def test_options_fall_back_to_the_settings_block(tmp_path, monkeypatch):
         dryRun=False,
         reenterPassword=False,
         storePassword=False,
+        unzip=True,
         maxAttempts=3,
         retryDelayStep=10,
     )
@@ -1206,6 +1244,45 @@ def test_store_password_must_be_a_bool(tmp_path, monkeypatch, badValue):
 
     # ASSERT
     assert "STORE_PASSWORD" in message
+
+
+def test_frames_stay_compressed_by_default(tmp_path):
+    # ACT
+    options = dsd.resolve_options(cli("--user", "dave", "--data-dir", str(tmp_path)))
+
+    # ASSERT
+    assert options.unzip is False
+
+
+def test_unzip_flag_turns_unzipping_on(tmp_path):
+    # ACT
+    options = dsd.resolve_options(cli("--user", "dave", "--data-dir", str(tmp_path), "--unzip"))
+
+    # ASSERT
+    assert options.unzip is True
+
+
+@pytest.mark.parametrize("badValue", ["yes", 1, 0, None])
+def test_unzip_frames_must_be_a_bool(tmp_path, monkeypatch, badValue):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "UNZIP_FRAMES", badValue)
+
+    # ACT
+    message = exit_message("--user", "dave", "--data-dir", str(tmp_path))
+
+    # ASSERT
+    assert "UNZIP_FRAMES" in message
+
+
+def test_main_passes_the_unzip_flag_through_to_the_download(tmp_path):
+    # ARRANGE
+    eso = make_eso(make_archive_table([("SOXS.B", "SCIENCE", "2026-01-27T20:00:00")]))
+
+    # ACT
+    run_main(eso, tmp_path, "--unzip")
+
+    # ASSERT
+    eso.retrieve_data.assert_called_once_with(["SOXS.B"], destination=str(tmp_path / "2026-01-27"), unzip=True)
 
 
 # ---------------------------------------------------------------- LOG DESTINATION AND RESCAN
