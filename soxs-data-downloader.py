@@ -66,7 +66,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 # ---------------- USER SETTINGS: EDIT THESE ----------------
 ESO_USERNAME = None          # e.g. "your_eso_username"; --user overrides
 DATA_DIR = None              # e.g. "/data/soxs/raw"; --data-dir overrides
-FRAME_CATEGORIES = ["SCIENCE", "CALIB", "ACQUISITION"];     # None = all categories, or a list e.g. ["SCIENCE", "CALIB"]; --category overrides
+FRAME_CATEGORIES = ["SCIENCE", "CALIB", "ACQUISITION"]  # None = all categories, or a list e.g. ["SCIENCE", "CALIB"]; --category overrides
 DEFAULT_START_NIGHT = None   # "YYYY-MM-DD" or None; --start-night overrides
 DEFAULT_END_NIGHT = None     # "YYYY-MM-DD" or None; --end-night overrides
 STORE_PASSWORD = True        # keep ESO password in the system keyring
