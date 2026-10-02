@@ -7,7 +7,8 @@ The script asks the ESO archive for the SOXS raw frames in the chosen categories
 the data folder, and downloads only the missing ones. A
 frame counts as present if its ``.fits``, ``.fits.Z`` or ``.fits.gz`` file exists
 in any subfolder. New frames go into one folder per night, named ``YYYY-MM-DD``
-after the UT date 12 hours before the observation.
+after the UT date 12 hours before the observation. Downloaded frames stay
+compressed (``.fits.Z``) unless you pass ``--unzip``.
 
 You can set your ESO username, the data folder and the other defaults in the
 settings block at the top of this script. A command-line flag always overrides
@@ -24,7 +25,7 @@ astroquery 0.4.12 or later.
     2026-10-02
 
 Usage:
-    soxs-data-downloader.py [--user=<username>] [--data-dir=<path>] [--category=<cat>...] [--start-night=<YYYY-MM-DD>] [--end-night=<YYYY-MM-DD>] [--dry-run] [--reenter-password]
+    soxs-data-downloader.py [--user=<username>] [--data-dir=<path>] [--category=<cat>...] [--start-night=<YYYY-MM-DD>] [--end-night=<YYYY-MM-DD>] [--dry-run] [--reenter-password] [--unzip]
     soxs-data-downloader.py -h | --help
 
 Options:
@@ -36,6 +37,7 @@ Options:
     --end-night=<YYYY-MM-DD>      only consider frames up to and including this UT night (overrides DEFAULT_END_NIGHT)
     --dry-run                     list the missing frames and stop
     --reenter-password            ask for the ESO password and replace the one stored in the keyring
+    --unzip                       unzip the downloaded frames; they stay compressed by default (turns unzipping on even when UNZIP_FRAMES is False)
 """
 
 import logging
@@ -60,6 +62,7 @@ FRAME_CATEGORIES = None     # None = all categories, or a list e.g. ["SCIENCE", 
 DEFAULT_START_NIGHT = None   # "YYYY-MM-DD" or None; --start-night overrides
 DEFAULT_END_NIGHT = None     # "YYYY-MM-DD" or None; --end-night overrides
 STORE_PASSWORD = True        # keep ESO password in the system keyring
+UNZIP_FRAMES = False         # True = unzip downloaded frames; --unzip turns this on for one run
 MAX_DOWNLOAD_ATTEMPTS = 5
 RETRY_DELAY_STEP_SECONDS = 30
 # -----------------------------------------------------------
@@ -93,6 +96,7 @@ class Options:
     - ``dryRun`` -- list the missing frames and stop
     - ``reenterPassword`` -- ask for a new ESO password and store it
     - ``storePassword`` -- keep the ESO password in the system keyring
+    - ``unzip`` -- unzip the downloaded frames instead of keeping them compressed
     - ``maxAttempts`` -- tries per night before giving up on a lost connection
     - ``retryDelayStep`` -- seconds added to the wait after each failed try
 
@@ -109,6 +113,7 @@ class Options:
     dryRun: bool
     reenterPassword: bool
     storePassword: bool
+    unzip: bool
     maxAttempts: int
     retryDelayStep: float
 
@@ -333,6 +338,8 @@ def download_night(
     maxAttempts: int,
     retryDelayStep: float,
     log: logging.Logger,
+    *,
+    unzip: bool = False,
 ) -> None:
     """*download the frames of one night into ``dataDir/night``*
 
@@ -349,6 +356,7 @@ def download_night(
     - ``maxAttempts`` -- tries in total before the error is raised
     - ``retryDelayStep`` -- seconds to wait after the first failure; the wait grows by this much after each further one
     - ``log`` -- the logger
+    - ``unzip`` -- unzip the frames after download; ``False`` keeps them compressed
 
     **Usage:**
 
@@ -358,7 +366,7 @@ def download_night(
     remaining = ids
     for attempt in range(1, maxAttempts + 1):
         try:
-            eso.retrieve_data(remaining, destination=str(nightDir), unzip=True)
+            eso.retrieve_data(remaining, destination=str(nightDir), unzip=unzip)
             return
         except RETRYABLE_ERRORS as error:
             if attempt == maxAttempts:
@@ -382,6 +390,8 @@ def download_missing(
     maxAttempts: int,
     retryDelayStep: float,
     log: logging.Logger,
+    *,
+    unzip: bool = False,
 ) -> None:
     """*download the missing frames into their night folders*
 
@@ -397,6 +407,7 @@ def download_missing(
     - ``maxAttempts`` -- tries per night before giving up on it
     - ``retryDelayStep`` -- seconds added to the wait after each failed try
     - ``log`` -- the logger
+    - ``unzip`` -- unzip the frames after download; ``False`` keeps them compressed
 
     **Usage:**
 
@@ -412,7 +423,7 @@ def download_missing(
         ids = idsByNight[night]
         log.info("Night %s (%d/%d): downloading %d frames", night, index, len(idsByNight), len(ids))
         try:
-            download_night(eso, night, ids, dataDir, maxAttempts, retryDelayStep, log)
+            download_night(eso, night, ids, dataDir, maxAttempts, retryDelayStep, log, unzip=unzip)
         except DOWNLOAD_ERRORS as error:
             log.error("Night %s: download stopped (%s). Continuing with the next night.", night, error)
 
@@ -630,8 +641,8 @@ def _check_retry_delay(value: Any) -> float:
     return value
 
 
-def _check_store_password(value: Any) -> bool:
-    """*validate the store-password setting*
+def _check_bool(value: Any) -> bool:
+    """*validate a True or False setting*
 
     **Key Arguments:**
 
@@ -639,7 +650,7 @@ def _check_store_password(value: Any) -> bool:
 
     **Return:**
 
-    - ``storePassword`` -- the same bool
+    - ``flag`` -- the same bool
     """
     if not isinstance(value, bool):
         raise ValueError("must be True or False")
@@ -703,7 +714,8 @@ def resolve_options(arguments: dict[str, Any]) -> Options:
         endNight=endNight,
         dryRun=bool(arguments["--dry-run"]),
         reenterPassword=bool(arguments["--reenter-password"]),
-        storePassword=_checked(_check_store_password, STORE_PASSWORD, "STORE_PASSWORD"),
+        storePassword=_checked(_check_bool, STORE_PASSWORD, "STORE_PASSWORD"),
+        unzip=_checked(_check_bool, UNZIP_FRAMES, "UNZIP_FRAMES") or bool(arguments["--unzip"]),
         maxAttempts=_checked(_check_max_attempts, MAX_DOWNLOAD_ATTEMPTS, "MAX_DOWNLOAD_ATTEMPTS"),
         retryDelayStep=_checked(_check_retry_delay, RETRY_DELAY_STEP_SECONDS, "RETRY_DELAY_STEP_SECONDS"),
     )
@@ -836,7 +848,7 @@ def sync_archive(eso: Eso, options: Options, log: logging.Logger) -> int:
     if len(missing) == 0:
         return 0
 
-    download_missing(eso, missing, options.dataDir, options.maxAttempts, options.retryDelayStep, log)
+    download_missing(eso, missing, options.dataDir, options.maxAttempts, options.retryDelayStep, log, unzip=options.unzip)
 
     return _verify_download(missing, options, log)
 
