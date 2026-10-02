@@ -10,8 +10,10 @@ in any subfolder. New frames go into one folder per night, named ``YYYY-MM-DD``
 after the UT date 12 hours before the observation. Downloaded frames stay
 compressed (``.fits.Z``) unless you pass ``--unzip``.
 
-Each run starts by reporting how many frames the archive holds, how many are
-already on disk (with the percentage downloaded) and how many are missing. A
+Each run starts by reporting how many frames the archive holds, then a table
+with the frames in the archive, on disk and missing for each category, the
+percentage downloaded and a progress bar. The table is coloured when stderr is a
+terminal. Colour is off when ``NO_COLOR`` is set to a non-empty value. A
 progress bar follows the download. Other log lines are hidden unless
 ``LOG_LEVEL`` is lowered to ``"INFO"`` or ``"DEBUG"``.
 
@@ -53,7 +55,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import requests
 from astropy.table import Table
@@ -87,6 +89,20 @@ NIGHT_ROLLOVER = timedelta(hours=12)
 ARCHIVE_FILTER_MARGIN = timedelta(hours=1)
 NIGHT_FORMAT = "%Y-%m-%d"
 NO_ROW_LIMIT = -1
+# THE STATUS TABLE SHOWN AT THE START OF A RUN
+TOTAL_LABEL = "Total"
+PROGRESS_BAR_WIDTH = 20
+STATUS_HEADERS = ("Category", "Archive", "Share", "On disk", "Missing", "Downloaded", "Progress")
+LEFT_ALIGNED_COLUMNS = (0, 6)
+PARTIAL_BAR_CELLS = " ▏▎▍▌▋▊▉"
+NEAR_COMPLETE_TENTHS = 9  # YELLOW FROM 9 TENTHS (90%) COMPLETE
+TABLE_COLUMN_GAP = "  "
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "\033[1m"
+ANSI_DIM = "\033[2m"
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
 DOWNLOAD_ERRORS = (OSError, requests.RequestException, RemoteServiceError)
 # A LOST OR STALLED CONNECTION. astroquery LETS THESE OUT OF retrieve_data, ENDING THE WHOLE NIGHT
 RETRYABLE_ERRORS = (requests.ConnectionError, requests.exceptions.ChunkedEncodingError, requests.Timeout, ConnectionError)
@@ -536,6 +552,217 @@ def summarise(table: Table) -> str:
     return ", ".join(f"{category}={n}" for category, n in sorted(counts.items())) or "none"
 
 
+@dataclass(frozen=True)
+class StatusRow:
+    """*one row of the status table shown at the start of a run*
+
+    **Key Arguments:**
+
+    - ``category`` -- the frame category, or ``Total`` for the sum of all categories
+    - ``archive`` -- the number of frames the archive holds
+    - ``present`` -- the number of those frames on disk
+    - ``missing`` -- the number of those frames not on disk
+
+    **Usage:**
+
+        row = StatusRow("CALIB", 3, 1, 2)
+    """
+
+    category: str
+    archive: int
+    present: int
+    missing: int
+
+
+def category_counts(archiveTable: Table, presentTable: Table) -> list[StatusRow]:
+    """*count the archive, on-disk and missing frames per category*
+
+    **Key Arguments:**
+
+    - ``archiveTable`` -- the archive rows, with a ``dp_cat`` column
+    - ``presentTable`` -- the archive rows already on disk
+
+    **Return:**
+
+    - ``rows`` -- one row per archive category, sorted by category, then a ``Total`` row; empty for an empty archive
+
+    **Usage:**
+
+        rows = category_counts(archiveTable, present)
+    """
+    from collections import Counter
+
+    if len(archiveTable) == 0:
+        return []
+    archiveCounts = Counter(str(category) for category in archiveTable["dp_cat"])
+    presentCounts = Counter(str(category) for category in presentTable["dp_cat"])
+    rows = [StatusRow(category, n, presentCounts[category], n - presentCounts[category]) for category, n in sorted(archiveCounts.items())]
+    rows.append(StatusRow(TOTAL_LABEL, len(archiveTable), len(presentTable), len(archiveTable) - len(presentTable)))
+    return rows
+
+
+def progress_bar(present: int, total: int, width: int = PROGRESS_BAR_WIDTH) -> str:
+    """*draw a text progress bar of eighth-block cells*
+
+    The fill is rounded down. While any frame is missing, the bar stops one eighth
+    short of full, so a full bar always means that nothing is missing.
+
+    **Key Arguments:**
+
+    - ``present`` -- the number of frames on disk
+    - ``total`` -- the number of frames in the archive; a ``ValueError`` is raised if it is 0
+    - ``width`` -- the number of cells in the bar
+
+    **Return:**
+
+    - ``bar`` -- ``width`` characters, padded on the right with spaces
+
+    **Usage:**
+
+        bar = progress_bar(947, 1000)
+    """
+    if total <= 0:
+        raise ValueError("cannot draw a progress bar for an empty total")
+    eighths = present * width * 8 // total
+    if present < total:
+        eighths = min(eighths, width * 8 - 1)
+    fullCells, partialEighths = divmod(eighths, 8)
+    # A FULL BAR HAS NO PARTIAL CELL, SO THE CUT KEEPS IT AT width CELLS
+    return ("█" * fullCells + PARTIAL_BAR_CELLS[partialEighths])[:width].ljust(width)
+
+
+def completion_colour(present: int, total: int) -> str:
+    """*choose the ANSI colour that grades how complete a download is*
+
+    **Key Arguments:**
+
+    - ``present`` -- the number of frames on disk
+    - ``total`` -- the number of frames in the archive; a ``ValueError`` is raised if it is 0
+
+    **Return:**
+
+    - ``colour`` -- green when complete, yellow from ``NEAR_COMPLETE_TENTHS`` tenths up, red below it
+
+    **Usage:**
+
+        colour = completion_colour(947, 1000)
+    """
+    if total <= 0:
+        raise ValueError("cannot grade the completion of an empty total")
+    if present >= total:
+        return ANSI_GREEN
+    if present * 10 >= total * NEAR_COMPLETE_TENTHS:
+        return ANSI_YELLOW
+    return ANSI_RED
+
+
+def use_colour(stream: TextIO | None) -> bool:
+    """*decide whether to colour the output written to a stream*
+
+    Colour is used only for a terminal, and never when the ``NO_COLOR`` environment variable is set and not empty.
+
+    **Key Arguments:**
+
+    - ``stream`` -- the stream the output goes to, for example ``sys.stderr``; ``None`` or a stream with no ``isatty`` method gives no colour
+
+    **Return:**
+
+    - ``isColour`` -- ``True`` if the output can carry colour codes
+
+    **Usage:**
+
+        isColour = use_colour(sys.stderr)
+    """
+    isatty = getattr(stream, "isatty", None)
+    if isatty is None or not isatty():
+        return False
+    return not os.environ.get("NO_COLOR")
+
+
+def _style(text: str, codes: tuple[str, ...], colour: bool) -> str:
+    """*wrap the visible part of a padded cell in ANSI codes, leaving the padding plain*
+
+    **Key Arguments:**
+
+    - ``text`` -- the cell text, already padded to its column width
+    - ``codes`` -- the ANSI codes to apply
+    - ``colour`` -- ``False`` returns the text unchanged
+
+    **Return:**
+
+    - ``styled`` -- the text with the visible part coloured, or the text unchanged if there is nothing to colour
+    """
+    visible = text.strip()
+    if not colour or not visible or not codes:
+        return text
+    start = text.index(visible)
+    return f"{text[:start]}{''.join(codes)}{visible}{ANSI_RESET}{text[start + len(visible):]}"
+
+
+def _status_cells(row: StatusRow, totalArchive: int) -> list[tuple[str, tuple[str, ...]]]:
+    """*build the seven ``(text, codes)`` cells of one status table row*
+
+    **Key Arguments:**
+
+    - ``row`` -- the row to show
+    - ``totalArchive`` -- the number of frames in the whole archive, for the share column
+
+    **Return:**
+
+    - ``cells`` -- seven ``(text, codes)`` pairs, one per column of ``STATUS_HEADERS``
+    """
+    gradeCodes = (completion_colour(row.present, row.archive),)
+    missingCodes = (ANSI_RED,) if row.missing > 0 else (ANSI_DIM,)
+    return [
+        (row.category, ()),
+        (f"{row.archive:,}", ()),
+        (f"{row.archive / totalArchive:.1%}", ()),
+        (f"{row.present:,}", ()),
+        (f"{row.missing:,}", missingCodes),
+        (percent_downloaded(row.present, row.archive), gradeCodes),
+        (progress_bar(row.present, row.archive), gradeCodes),
+    ]
+
+
+def format_status_table(rows: list[StatusRow], colour: bool) -> list[str]:
+    """*lay out the status table as lines of text*
+
+    Columns are padded to their visible width before any colour code is added, so they stay aligned.
+
+    **Key Arguments:**
+
+    - ``rows`` -- the rows from ``category_counts``, ending with the ``Total`` row
+    - ``colour`` -- add ANSI colour codes
+
+    **Return:**
+
+    - ``lines`` -- the header line, then one line per row; empty if there are no rows
+
+    **Usage:**
+
+        for line in format_status_table(category_counts(archiveTable, present), use_colour(sys.stderr)):
+            report(line)
+    """
+    if not rows:
+        return []
+    totalArchive = sum(row.archive for row in rows if row.category != TOTAL_LABEL)
+    cellRows = [[(header, (ANSI_BOLD,)) for header in STATUS_HEADERS]]
+    for row in rows:
+        cells = _status_cells(row, totalArchive)
+        if row.category == TOTAL_LABEL:
+            cells = [(text, (ANSI_BOLD, *codes)) for text, codes in cells]
+        cellRows.append(cells)
+    widths = [max(len(cells[column][0]) for cells in cellRows) for column in range(len(STATUS_HEADERS))]
+    lines = []
+    for cells in cellRows:
+        padded = [
+            _style(text.ljust(width) if column in LEFT_ALIGNED_COLUMNS else text.rjust(width), codes, colour)
+            for column, ((text, codes), width) in enumerate(zip(cells, widths))
+        ]
+        lines.append(TABLE_COLUMN_GAP.join(padded))
+    return lines
+
+
 def parse_night(value: str) -> date:
     """*parse a ``YYYY-MM-DD`` night*
 
@@ -970,8 +1197,8 @@ def sync_archive(eso: Eso, options: Options, log: logging.Logger) -> int:
         return 1
     present = find_present(archiveTable, localIds)
     missing = find_missing(archiveTable, localIds)
-    report(f"Already on disk: {len(present)} frames ({summarise(present)}), {percent_downloaded(len(present), len(archiveTable))} downloaded")
-    report(f"{len(missing)} frames are missing locally ({summarise(missing)})")
+    for line in format_status_table(category_counts(archiveTable, present), use_colour(sys.stderr)):
+        report(line)
 
     if options.dryRun:
         for row in missing:
