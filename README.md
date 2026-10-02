@@ -1,26 +1,6 @@
 # soxs-data-downloader
 
-A command-line script that downloads the SOXS raw frames that are in the ESO Science Archive but not yet on your disk.
-It is for SOXS team members who have an ESO User Portal account.
-
-## Contents
-
-- [Requirements](#requirements)
-- [Install](#install)
-- [Configure](#configure)
-- [Usage](#usage)
-- [How frames are organized](#how-frames-are-organized)
-- [Exit codes](#exit-codes)
-- [Troubleshooting](#troubleshooting)
-- [Run the tests](#run-the-tests)
-- [Continuous integration](#continuous-integration)
-- [Licence](#licence)
-
-## Requirements
-
-- Python 3.11 or later. The conda environment in `environment.yml` and the CI workflow use Python 3.12.
-- astroquery 0.4.12 or later. This version is currently a pre-release.
-- An ESO User Portal account that has access to SOXS data
+A command-line script that downloads SOXS raw frames from the ESO Science Archive. This is for SOXS team members who have an ESO User Portal account. Files already downloaded to your machine are recognised and not downloaded again.
 
 ## Install
 
@@ -44,6 +24,8 @@ It is for SOXS team members who have an ESO User Portal account.
    ```bash
    pip install -r requirements.txt
    ```
+
+Alternatively, just download the script and install it however you want!
 
 ## Configure
 
