@@ -118,13 +118,20 @@ At the start of every run, the script writes a summary to stderr. It does this a
 ```text
 Querying the ESO archive for all SOXS raw frames
 Archive holds 63335 frames (ACQUISITION=2029, CALIB=58514, SCIENCE=2792)
-Already on disk: 60000 frames (ACQUISITION=2000, CALIB=56000, SCIENCE=2000), 94.7% downloaded
-3335 frames are missing locally (ACQUISITION=29, CALIB=2514, SCIENCE=792)
+Category     Archive   Share  On disk  Missing  Downloaded  Progress
+ACQUISITION    2,029    3.2%    2,029        0      100.0%  ████████████████████
+CALIB         58,514   92.4%   58,085      429       99.2%  ███████████████████▊
+SCIENCE        2,792    4.4%    2,792        0      100.0%  ████████████████████
+Total         63,335  100.0%   62,906      429       99.3%  ███████████████████▊
 ```
 
 - **Archive holds.** The frames in the archive that match your night range and categories.
-- **Already on disk.** The part of those frames that you already have. Frames outside your night range or categories are not counted. The percentage is rounded down, so `100.0%` shows only when no frame is missing.
-- **Missing locally.** The frames the script will download.
+- **Archive, Share.** The frames the archive holds in each category, and the part of the whole archive that category makes up.
+- **On disk.** The part of those frames that you already have. Frames outside your night range or categories are not counted.
+- **Missing.** The frames the script will download.
+- **Downloaded and Progress.** The part of the category that is on disk. The percentage is rounded down, so `100.0%` shows only when no frame is missing. The bar is 20 cells wide. While any frame is missing, the bar stops one eighth of a cell short of full, so a full bar always means that nothing is missing.
+
+When stderr is a terminal, the script colours the table. `Downloaded` and the bar are green at 100%, yellow from 90%, and red below 90%. `Missing` is red when frames are missing and dim when none are. The header and the `Total` row are bold. The script adds no colour when stderr is not a terminal. Colour is off when `NO_COLOR` is set to a non-empty value.
 
 If the archive holds no matching frames, the script stops after the first two lines.
 

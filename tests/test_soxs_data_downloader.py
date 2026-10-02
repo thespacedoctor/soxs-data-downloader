@@ -185,6 +185,281 @@ def test_summarise_says_none_for_an_empty_table():
     assert dsd.summarise(make_archive_table([])) == "none"
 
 
+ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text):
+    return ANSI_PATTERN.sub("", text)
+
+
+def make_status_rows():
+    return [
+        dsd.StatusRow("ACQUISITION", 2029, 2029, 0),
+        dsd.StatusRow("CALIB", 58514, 58085, 429),
+        dsd.StatusRow("SCIENCE", 2792, 2792, 0),
+        dsd.StatusRow("Total", 63335, 62906, 429),
+    ]
+
+
+def test_category_counts_gives_sorted_category_rows_then_a_total_row():
+    # ARRANGE
+    archiveTable = make_archive_table([
+        ("SOXS.A", "SCIENCE", "2026-01-11T09:00:00"),
+        ("SOXS.B", "CALIB", "2026-01-11T10:00:00"),
+        ("SOXS.C", "CALIB", "2026-01-11T11:00:00"),
+        ("SOXS.D", "CALIB", "2026-01-11T12:00:00"),
+    ])
+    presentTable = dsd.find_present(archiveTable, {"SOXS.A", "SOXS.B"})
+
+    # ACT
+    rows = dsd.category_counts(archiveTable, presentTable)
+
+    # ASSERT
+    assert rows == [
+        dsd.StatusRow("CALIB", 3, 1, 2),
+        dsd.StatusRow("SCIENCE", 1, 1, 0),
+        dsd.StatusRow("Total", 4, 2, 2),
+    ]
+
+
+def test_category_counts_shows_zero_present_for_a_category_with_nothing_on_disk():
+    # ARRANGE
+    archiveTable = make_archive_table([("SOXS.A", "CALIB", "2026-01-11T09:00:00")])
+    presentTable = dsd.find_present(archiveTable, set())
+
+    # ACT
+    rows = dsd.category_counts(archiveTable, presentTable)
+
+    # ASSERT
+    assert rows[0] == dsd.StatusRow("CALIB", 1, 0, 1)
+
+
+def test_status_row_is_frozen():
+    # ARRANGE
+    row = dsd.StatusRow("CALIB", 3, 1, 2)
+
+    # ACT / ASSERT
+    with pytest.raises(FrozenInstanceError):
+        row.archive = 4
+
+
+@pytest.mark.parametrize(
+    "present, total, expected",
+    [
+        (10, 10, "█" * 20),
+        (0, 10, " " * 20),
+        (1, 2, "█" * 10 + " " * 10),
+        (6, 1000, " " * 20),
+        (7, 1000, "▏" + " " * 19),
+        (50, 1000, "█" + " " * 19),
+        (63, 1000, "█▎" + " " * 18),
+    ],
+)
+def test_progress_bar_fills_eighth_cells_and_floors(present, total, expected):
+    assert dsd.progress_bar(present, total) == expected
+
+
+def test_progress_bar_stays_one_eighth_short_of_full_when_a_frame_is_missing():
+    # ACT
+    bar = dsd.progress_bar(99999, 100000)
+
+    # ASSERT
+    assert bar == "█" * 19 + "▉"
+
+
+def test_progress_bar_honours_a_custom_width():
+    assert dsd.progress_bar(1, 2, width=4) == "██  "
+
+
+def test_progress_bar_rejects_an_empty_total():
+    with pytest.raises(ValueError, match="empty"):
+        dsd.progress_bar(0, 0)
+
+
+@pytest.mark.parametrize(
+    "present, total, expected",
+    [
+        (1000, 1000, dsd.ANSI_GREEN),
+        (999, 1000, dsd.ANSI_YELLOW),
+        (900, 1000, dsd.ANSI_YELLOW),
+        (899, 1000, dsd.ANSI_RED),
+        (0, 1000, dsd.ANSI_RED),
+    ],
+)
+def test_completion_colour_is_green_when_complete_yellow_when_near_and_red_below(present, total, expected):
+    assert dsd.completion_colour(present, total) == expected
+
+
+def test_completion_colour_rejects_an_empty_total():
+    with pytest.raises(ValueError, match="empty"):
+        dsd.completion_colour(0, 0)
+
+
+def test_use_colour_is_true_for_a_terminal_without_no_color(monkeypatch):
+    # ARRANGE
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    stream = mock.Mock()
+    stream.isatty.return_value = True
+
+    # ACT / ASSERT
+    assert dsd.use_colour(stream) is True
+
+
+def test_use_colour_is_false_when_the_stream_is_not_a_terminal(monkeypatch):
+    # ARRANGE
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    stream = mock.Mock()
+    stream.isatty.return_value = False
+
+    # ACT / ASSERT
+    assert dsd.use_colour(stream) is False
+
+
+def test_use_colour_is_false_when_no_color_is_set(monkeypatch):
+    # ARRANGE
+    monkeypatch.setenv("NO_COLOR", "1")
+    stream = mock.Mock()
+    stream.isatty.return_value = True
+
+    # ACT / ASSERT
+    assert dsd.use_colour(stream) is False
+
+
+def test_use_colour_ignores_an_empty_no_color(monkeypatch):
+    # ARRANGE
+    monkeypatch.setenv("NO_COLOR", "")
+    stream = mock.Mock()
+    stream.isatty.return_value = True
+
+    # ACT / ASSERT
+    assert dsd.use_colour(stream) is True
+
+
+def test_use_colour_is_false_when_there_is_no_stream(monkeypatch):
+    # ARRANGE
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    # ACT / ASSERT
+    assert dsd.use_colour(None) is False
+
+
+def test_use_colour_is_false_when_the_stream_has_no_isatty(monkeypatch):
+    # ARRANGE
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    # ACT / ASSERT
+    assert dsd.use_colour(object()) is False
+
+
+def test_format_status_table_plain_text_aligns_every_column():
+    # ARRANGE
+    rows = make_status_rows()
+
+    # ACT
+    lines = dsd.format_status_table(rows, colour=False)
+
+    # ASSERT
+    assert lines == [
+        "Category     Archive   Share  On disk  Missing  Downloaded  Progress" + " " * 12,
+        "ACQUISITION    2,029    3.2%    2,029        0      100.0%  " + "█" * 20,
+        "CALIB         58,514   92.4%   58,085      429       99.2%  " + "█" * 19 + "▊",
+        "SCIENCE        2,792    4.4%    2,792        0      100.0%  " + "█" * 20,
+        "Total         63,335  100.0%   62,906      429       99.3%  " + "█" * 19 + "▊",
+    ]
+
+
+def test_format_status_table_keeps_the_full_bar_width_for_a_row_with_nothing_on_disk():
+    # ARRANGE
+    rows = [dsd.StatusRow("CALIB", 5, 0, 5), dsd.StatusRow("Total", 5, 0, 5)]
+
+    # ACT
+    lines = dsd.format_status_table(rows, colour=False)
+
+    # ASSERT
+    assert lines[1].endswith("  0.0%  " + " " * 20)
+    assert lines[2].endswith("  0.0%  " + " " * 20)
+
+
+def test_category_counts_gives_no_rows_for_an_empty_archive():
+    # ARRANGE
+    emptyTable = make_archive_table([])
+
+    # ACT
+    rows = dsd.category_counts(emptyTable, dsd.find_present(emptyTable, set()))
+
+    # ASSERT
+    assert rows == []
+
+
+def test_format_status_table_gives_no_lines_for_an_empty_archive():
+    # ARRANGE
+    emptyTable = make_archive_table([])
+    rows = dsd.category_counts(emptyTable, dsd.find_present(emptyTable, set()))
+
+    # ACT / ASSERT
+    assert dsd.format_status_table(rows, colour=False) == []
+    assert dsd.format_status_table(rows, colour=True) == []
+
+
+def test_format_status_table_plain_text_has_no_escape_codes():
+    # ACT
+    text = "\n".join(dsd.format_status_table(make_status_rows(), colour=False))
+
+    # ASSERT
+    assert "\x1b" not in text
+
+
+def test_format_status_table_colour_keeps_the_same_visible_text():
+    # ARRANGE
+    rows = make_status_rows()
+
+    # ACT
+    plain = dsd.format_status_table(rows, colour=False)
+    coloured = dsd.format_status_table(rows, colour=True)
+
+    # ASSERT
+    assert [strip_ansi(line) for line in coloured] == plain
+
+
+def test_format_status_table_colour_makes_header_and_total_bold():
+    # ACT
+    lines = dsd.format_status_table(make_status_rows(), colour=True)
+
+    # ASSERT
+    assert dsd.ANSI_BOLD in lines[0]
+    assert dsd.ANSI_BOLD in lines[-1]
+    assert dsd.ANSI_BOLD not in lines[1]
+
+
+def test_format_status_table_colour_marks_missing_red_and_zero_missing_dim():
+    # ACT
+    lines = dsd.format_status_table(make_status_rows(), colour=True)
+
+    # ASSERT
+    assert f"    {dsd.ANSI_RED}429{dsd.ANSI_RESET}" in lines[2]
+    assert f"      {dsd.ANSI_DIM}0{dsd.ANSI_RESET}" in lines[1]
+
+
+def test_format_status_table_colour_grades_downloaded_percent_and_bar_by_completion():
+    # ARRANGE
+    rows = [
+        dsd.StatusRow("A", 10, 10, 0),
+        dsd.StatusRow("B", 100, 95, 5),
+        dsd.StatusRow("C", 100, 50, 50),
+        dsd.StatusRow("Total", 210, 155, 55),
+    ]
+
+    # ACT
+    lines = dsd.format_status_table(rows, colour=True)
+
+    # ASSERT
+    assert f"    {dsd.ANSI_GREEN}100.0%{dsd.ANSI_RESET}" in lines[1]
+    assert f"{dsd.ANSI_GREEN}{'█' * 20}{dsd.ANSI_RESET}" in lines[1]
+    assert f"     {dsd.ANSI_YELLOW}95.0%{dsd.ANSI_RESET}" in lines[2]
+    assert f"     {dsd.ANSI_RED}50.0%{dsd.ANSI_RESET}" in lines[3]
+    assert f"{dsd.ANSI_RED}{'█' * 10}{dsd.ANSI_RESET}" in lines[3]
+
+
 def test_find_present_keeps_only_archive_rows_on_disk():
     # ARRANGE
     archiveTable = make_archive_table([
@@ -1600,8 +1875,36 @@ def test_main_reports_archive_disk_and_missing_counts_at_the_start(tmp_path, cap
     # ASSERT
     errLines = capsys.readouterr().err.splitlines()
     assert "Archive holds 2 frames (CALIB=1, SCIENCE=1)" in errLines
-    assert "Already on disk: 1 frames (CALIB=1), 50.0% downloaded" in errLines
-    assert "1 frames are missing locally (SCIENCE=1)" in errLines
+    statusRows = [line.split() for line in errLines if line.startswith(("Category", "CALIB", "SCIENCE", "Total"))]
+    assert statusRows == [
+        ["Category", "Archive", "Share", "On", "disk", "Missing", "Downloaded", "Progress"],
+        ["CALIB", "1", "50.0%", "1", "0", "100.0%", "█" * 20],
+        ["SCIENCE", "1", "50.0%", "0", "1", "0.0%"],
+        ["Total", "2", "100.0%", "1", "1", "50.0%", "█" * 10],
+    ]
+
+
+def test_main_colours_the_status_table_when_colour_is_wanted(tmp_path, capsys, monkeypatch, fresh_fundamentals_logger):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "use_colour", lambda stream: True)
+    eso = make_eso(make_archive_table([("SOXS.B", "SCIENCE", "2026-01-27T20:00:00")]))
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    assert dsd.ANSI_RED in capsys.readouterr().err
+
+
+def test_main_writes_no_escape_codes_when_stderr_is_not_a_terminal(tmp_path, capsys, fresh_fundamentals_logger):
+    # ARRANGE
+    eso = make_eso(make_archive_table([("SOXS.B", "SCIENCE", "2026-01-27T20:00:00")]))
+
+    # ACT
+    run_main(eso, tmp_path, "--dry-run")
+
+    # ASSERT
+    assert "\x1b" not in capsys.readouterr().err
 
 
 def test_main_hides_info_log_lines_by_default(tmp_path, capsys, fresh_fundamentals_logger):
@@ -1660,7 +1963,7 @@ def test_main_reports_an_empty_archive_and_downloads_nothing(tmp_path, capsys, f
     # ASSERT
     err = capsys.readouterr().err
     assert "Archive holds 0 frames" in err
-    assert "Already on disk" not in err
+    assert "Category" not in err
     eso.retrieve_data.assert_not_called()
     assert status == 0
 
