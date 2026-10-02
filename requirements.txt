@@ -1,0 +1,7 @@
+# ASTROQUERY 0.4.12 IS NOT YET A FULL RELEASE; THE .dev0 FLOOR LETS PIP INSTALL THE PRE-RELEASE
+astroquery>=0.4.12.dev0
+astropy
+requests
+packaging
+docopt
+fundamentals

@@ -1,0 +1,8 @@
+[lint]
+ignore = [
+    # ESO date_obs values are naive UT by design, so naive datetimes are intended
+    "DTZ001",
+    "DTZ007",
+    # _checked catches ValueError only, so the validators must raise ValueError for a wrong type
+    "TRY004",
+]

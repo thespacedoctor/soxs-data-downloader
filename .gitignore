@@ -1,0 +1,19 @@
+# PYTHON
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# TEST AND COVERAGE
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# MACOS
+.DS_Store
+
+# TOOLING
+.codegraph/
+.ruff_cache/
