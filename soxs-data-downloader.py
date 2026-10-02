@@ -3,7 +3,7 @@
 *Download every SOXS raw frame in the ESO Science Archive that is not yet on disk.*
 
 The script asks the ESO archive for the SOXS raw frames in the chosen categories
-(all categories by default), compares them with the frames found anywhere under
+(SCIENCE, CALIB and ACQUISITION by default), compares them with the frames found anywhere under
 the data folder, and downloads only the missing ones. A
 frame counts as present if its ``.fits``, ``.fits.Z`` or ``.fits.gz`` file exists
 in any subfolder. New frames go into one folder per night, named ``YYYY-MM-DD``
@@ -37,7 +37,7 @@ Options:
     -h, --help                    show this help message
     --user=<username>             ESO User Portal username (overrides ESO_USERNAME)
     --data-dir=<path>             root folder of the local SOXS raw frames (overrides DATA_DIR)
-    --category=<cat>              frame category to download: SCIENCE, CALIB, ACQUISITION, TECHNICAL, TEST, SIMULATION or OTHER; repeat the flag for more than one; all categories by default (overrides FRAME_CATEGORIES)
+    --category=<cat>              frame category to download: SCIENCE, CALIB, ACQUISITION, TECHNICAL, TEST, SIMULATION or OTHER; repeat the flag for more than one; SCIENCE, CALIB and ACQUISITION by default (overrides FRAME_CATEGORIES)
     --start-night=<YYYY-MM-DD>    only consider frames from this UT night onward (overrides DEFAULT_START_NIGHT)
     --end-night=<YYYY-MM-DD>      only consider frames up to and including this UT night (overrides DEFAULT_END_NIGHT)
     --dry-run                     list the missing frames and stop
@@ -66,7 +66,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 # ---------------- USER SETTINGS: EDIT THESE ----------------
 ESO_USERNAME = None          # e.g. "your_eso_username"; --user overrides
 DATA_DIR = None              # e.g. "/data/soxs/raw"; --data-dir overrides
-FRAME_CATEGORIES = ["SCIENCE", "CALIB", "ACQUISITION"];     # None = all categories, or a list e.g. ["SCIENCE", "CALIB"]; --category overrides
+FRAME_CATEGORIES = ["SCIENCE", "CALIB", "ACQUISITION"]  # None = all categories, or a list e.g. ["SCIENCE", "CALIB"]; --category overrides
 DEFAULT_START_NIGHT = None   # "YYYY-MM-DD" or None; --start-night overrides
 DEFAULT_END_NIGHT = None     # "YYYY-MM-DD" or None; --end-night overrides
 STORE_PASSWORD = True        # keep ESO password in the system keyring
