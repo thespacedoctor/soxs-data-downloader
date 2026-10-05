@@ -61,6 +61,7 @@ A command-line flag always wins over the matching setting. The script checks eve
 
 Notes:
 
+- `--last-days=<N>` has no matching setting. It selects the N most recent UT nights, and the current night counts as one of them. It overrides `DEFAULT_START_NIGHT` and `DEFAULT_END_NIGHT`. You cannot use it with `--start-night` or `--end-night`. If you do, the script exits with an error.
 - The valid categories are `SCIENCE`, `CALIB`, `ACQUISITION`, `TECHNICAL`, `TEST`, `SIMULATION`, and `OTHER`. The script accepts lowercase names and converts them to uppercase.
 
 ### Password
@@ -78,6 +79,14 @@ Download the frames for a range of nights. Both ends are inclusive.
 ```bash
 python soxs-data-downloader.py --start-night=2026-01-26 --end-night=2026-01-31
 ```
+
+Download the frames from the last 7 UT nights, including the current night. The start is the current night minus 6 nights, and the end stays open.
+
+```bash
+python soxs-data-downloader.py --last-days=7
+```
+
+The night uses the same rule as the night folder names: the UT date 12 hours before now. `N` must be a whole number of 1 or more. `--last-days=1` selects the current night only. Do not use this flag with `--start-night` or `--end-night`. The script exits with an error if you do. The flag also overrides the `DEFAULT_START_NIGHT` and `DEFAULT_END_NIGHT` settings.
 
 Download calibration frames only.
 
