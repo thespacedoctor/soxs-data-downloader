@@ -22,7 +22,9 @@ settings block at the top of this script. A command-line flag always overrides
 the matching setting. The ESO password is asked for once and then kept in the
 system keyring. Use ``--reenter-password`` to replace a stored password that is
 wrong. ``--start-night`` and ``--end-night`` restrict the query to an inclusive
-range of UT nights (the same night convention as the folder names). Needs
+range of UT nights (the same night convention as the folder names).
+``--last-days`` restricts it to the most recent nights instead, counting the
+current one, and cannot be combined with those two flags. Needs
 astroquery 0.4.12 or later.
 
 :Author:
@@ -32,7 +34,7 @@ astroquery 0.4.12 or later.
     2026-10-02
 
 Usage:
-    soxs-data-downloader.py [--user=<username>] [--data-dir=<path>] [--category=<cat>...] [--start-night=<YYYY-MM-DD>] [--end-night=<YYYY-MM-DD>] [--dry-run] [--reenter-password] [--unzip]
+    soxs-data-downloader.py [--user=<username>] [--data-dir=<path>] [--category=<cat>...] [--start-night=<YYYY-MM-DD>] [--end-night=<YYYY-MM-DD>] [--last-days=<N>] [--dry-run] [--reenter-password] [--unzip]
     soxs-data-downloader.py -h | --help
 
 Options:
@@ -42,6 +44,7 @@ Options:
     --category=<cat>              frame category to download: SCIENCE, CALIB, ACQUISITION, TECHNICAL, TEST, SIMULATION or OTHER; repeat the flag for more than one; SCIENCE, CALIB and ACQUISITION by default (overrides FRAME_CATEGORIES)
     --start-night=<YYYY-MM-DD>    only consider frames from this UT night onward (overrides DEFAULT_START_NIGHT)
     --end-night=<YYYY-MM-DD>      only consider frames up to and including this UT night (overrides DEFAULT_END_NIGHT)
+    --last-days=<N>               only consider frames from the last N UT nights, including the current one; cannot be combined with --start-night or --end-night
     --dry-run                     list the missing frames and stop
     --reenter-password            ask for the ESO password and replace the one stored in the keyring
     --unzip                       unzip the downloaded frames; they stay compressed by default (turns unzipping on even when UNZIP_FRAMES is False)
@@ -69,8 +72,8 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 ESO_USERNAME = None          # e.g. "your_eso_username"; --user overrides
 DATA_DIR = None              # e.g. "/data/soxs/raw"; --data-dir overrides
 FRAME_CATEGORIES = ["SCIENCE", "CALIB", "ACQUISITION"]  # None = all categories, or a list e.g. ["SCIENCE", "CALIB"]; --category overrides
-DEFAULT_START_NIGHT = None   # "YYYY-MM-DD" or None; --start-night overrides
-DEFAULT_END_NIGHT = None     # "YYYY-MM-DD" or None; --end-night overrides
+DEFAULT_START_NIGHT = None   # "YYYY-MM-DD" or None; --start-night overrides; --last-days overrides both
+DEFAULT_END_NIGHT = None     # "YYYY-MM-DD" or None; --end-night overrides; --last-days overrides both
 STORE_PASSWORD = True        # keep ESO password in the system keyring
 UNZIP_FRAMES = False         # True = unzip downloaded frames; --unzip turns this on for one run
 MAX_DOWNLOAD_ATTEMPTS = 5
@@ -89,6 +92,7 @@ NIGHT_ROLLOVER = timedelta(hours=12)
 ARCHIVE_FILTER_MARGIN = timedelta(hours=1)
 NIGHT_FORMAT = "%Y-%m-%d"
 NO_ROW_LIMIT = -1
+MAX_LAST_DAYS = 36500
 # THE STATUS TABLE SHOWN AT THE START OF A RUN
 TOTAL_LABEL = "Total"
 PROGRESS_BAR_WIDTH = 20
@@ -306,6 +310,22 @@ def night_folder(dateObs: str) -> str:
     if observed.tzinfo is not None:
         observed = observed.astimezone(timezone.utc)
     return (observed - NIGHT_ROLLOVER).date().isoformat()
+
+
+def current_night() -> date:
+    """*return the current UT night*
+
+    The night follows the same convention as ``night_folder``: the UT date 12 hours before now.
+
+    **Return:**
+
+    - ``night`` -- the current night as a date
+
+    **Usage:**
+
+        night = current_night()  # date(2026, 1, 26) at 2026-01-27T11:59 UT
+    """
+    return date.fromisoformat(night_folder(datetime.now(timezone.utc).isoformat()))
 
 
 def night_bounds(startNight: date | None, endNight: date | None) -> tuple[datetime | None, datetime | None]:
@@ -921,6 +941,27 @@ def _check_night(value: Any) -> date | None:
     return None if value is None else parse_night(value)
 
 
+def _check_days(value: Any) -> int:
+    """*validate a number of nights given to ``--last-days``*
+
+    **Key Arguments:**
+
+    - ``value`` -- the number of nights as text, a whole number from 1 to ``MAX_LAST_DAYS``
+
+    **Return:**
+
+    - ``days`` -- the number of nights
+    """
+    message = f"not a whole number of days between 1 and {MAX_LAST_DAYS}: {value}"
+    try:
+        days = int(value)
+    except (ValueError, TypeError) as error:
+        raise ValueError(message) from error
+    if not 1 <= days <= MAX_LAST_DAYS:
+        raise ValueError(message)
+    return days
+
+
 def _check_max_attempts(value: Any) -> int:
     """*validate the number of download attempts*
 
@@ -1027,6 +1068,40 @@ def _log_to_stderr() -> None:
             handler.setStream(sys.stderr)
 
 
+def _resolve_nights(arguments: dict[str, Any]) -> tuple[date | None, date | None]:
+    """*return the validated ``(startNight, endNight)`` pair from the flags and settings*
+
+    ``--last-days`` gives an open-ended window that starts ``N - 1`` nights before the
+    current night. It beats the night settings and exits if it is combined with
+    ``--start-night`` or ``--end-night``. Otherwise each side comes from its flag or setting.
+
+    **Key Arguments:**
+
+    - ``arguments`` -- the docopt dictionary of command-line arguments
+
+    **Return:**
+
+    - ``nights`` -- the start and end night, each a date or ``None`` for an open side
+
+    **Usage:**
+
+        startNight, endNight = _resolve_nights(arguments)
+    """
+    if arguments["--last-days"] is not None:
+        if arguments["--start-night"] is not None or arguments["--end-night"] is not None:
+            sys.exit("--last-days cannot be combined with --start-night or --end-night")
+        days = _checked(_check_days, arguments["--last-days"], "--last-days")
+        return current_night() - timedelta(days=days - 1), None
+
+    startValue, startLabel = _pick(arguments["--start-night"], "--start-night", DEFAULT_START_NIGHT, "DEFAULT_START_NIGHT")
+    endValue, endLabel = _pick(arguments["--end-night"], "--end-night", DEFAULT_END_NIGHT, "DEFAULT_END_NIGHT")
+    startNight = _checked(_check_night, startValue, startLabel)
+    endNight = _checked(_check_night, endValue, endLabel)
+    if startNight and endNight and startNight > endNight:
+        sys.exit(f"{startLabel} ({startNight}) is after {endLabel} ({endNight})")
+    return startNight, endNight
+
+
 def resolve_options(arguments: dict[str, Any]) -> Options:
     """*merge the docopt arguments with the settings block into validated options*
 
@@ -1050,16 +1125,11 @@ def resolve_options(arguments: dict[str, Any]) -> Options:
     userValue, userLabel = _pick(arguments["--user"], "--user", ESO_USERNAME, "ESO_USERNAME")
     dataDirValue, dataDirLabel = _pick(arguments["--data-dir"], "--data-dir", DATA_DIR, "DATA_DIR")
     categoriesValue, categoriesLabel = _pick(arguments["--category"], "--category", FRAME_CATEGORIES, "FRAME_CATEGORIES")
-    startValue, startLabel = _pick(arguments["--start-night"], "--start-night", DEFAULT_START_NIGHT, "DEFAULT_START_NIGHT")
-    endValue, endLabel = _pick(arguments["--end-night"], "--end-night", DEFAULT_END_NIGHT, "DEFAULT_END_NIGHT")
 
     user = _checked(_check_username, _require(userValue, userLabel, "--user", "ESO_USERNAME", "ESO username"), userLabel)
     dataDir = _checked(_check_data_dir, _require(dataDirValue, dataDirLabel, "--data-dir", "DATA_DIR", "data folder"), dataDirLabel)
     categories = _checked(_check_categories, categoriesValue, categoriesLabel)
-    startNight = _checked(_check_night, startValue, startLabel)
-    endNight = _checked(_check_night, endValue, endLabel)
-    if startNight and endNight and startNight > endNight:
-        sys.exit(f"{startLabel} ({startNight}) is after {endLabel} ({endNight})")
+    startNight, endNight = _resolve_nights(arguments)
 
     return Options(
         user=user,

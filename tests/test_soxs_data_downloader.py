@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from dataclasses import FrozenInstanceError
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -1784,6 +1784,147 @@ def test_sync_archive_returns_error_when_the_rescan_after_download_fails(tmp_pat
     log.error.assert_called()
 
 
+# ---------------------------------------------------------------- LAST DAYS
+
+
+@pytest.fixture
+def currentNight(monkeypatch):
+    """Pin the current night to 2026-01-27."""
+    monkeypatch.setattr(dsd, "current_night", lambda: date(2026, 1, 27))
+
+
+def make_frozen_datetime(now):
+    """Return a ``datetime`` subclass whose ``now`` always gives ``now`` in the requested timezone."""
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.replace(tzinfo=tz)
+
+    return FrozenDatetime
+
+
+def test_last_days_starts_n_minus_one_nights_before_the_current_night(tmp_path, currentNight):
+    # ARRANGE
+    arguments = cli("--user", "dave", "--data-dir", str(tmp_path), "--last-days", "3")
+
+    # ACT
+    options = dsd.resolve_options(arguments)
+
+    # ASSERT
+    assert options.startNight == date(2026, 1, 25)
+    assert options.endNight is None
+
+
+def test_last_days_of_one_is_the_current_night_only(tmp_path, currentNight):
+    # ARRANGE
+    arguments = cli("--user", "dave", "--data-dir", str(tmp_path), "--last-days=1")
+
+    # ACT
+    options = dsd.resolve_options(arguments)
+
+    # ASSERT
+    assert options.startNight == date(2026, 1, 27)
+    assert options.endNight is None
+
+
+def test_last_days_counts_back_across_a_year_boundary(tmp_path, monkeypatch):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "current_night", lambda: date(2026, 1, 2))
+    arguments = cli("--user", "dave", "--data-dir", str(tmp_path), "--last-days", "5")
+
+    # ACT
+    options = dsd.resolve_options(arguments)
+
+    # ASSERT
+    assert options.startNight == date(2025, 12, 29)
+
+
+@pytest.mark.parametrize("nightFlag", ["--start-night", "--end-night"])
+def test_last_days_cannot_be_combined_with_a_night_flag(tmp_path, currentNight, nightFlag):
+    # ARRANGE / ACT
+    message = exit_message("--user", "dave", "--data-dir", str(tmp_path), "--last-days", "3", nightFlag, "2026-01-01")
+
+    # ASSERT
+    assert message == "--last-days cannot be combined with --start-night or --end-night"
+
+
+@pytest.mark.parametrize("value", ["0", "-2", "abc", "1.5", "", "36501", "99999999999"])
+def test_last_days_rejects_a_value_that_is_not_a_whole_number_in_range(tmp_path, currentNight, value):
+    # ARRANGE / ACT
+    message = exit_message("--user", "dave", "--data-dir", str(tmp_path), f"--last-days={value}")
+
+    # ASSERT
+    assert message.startswith("--last-days: not a whole number of days between 1 and 36500")
+    assert value in message
+
+
+def test_last_days_accepts_the_maximum_number_of_days(tmp_path, currentNight):
+    # ARRANGE
+    arguments = cli("--user", "dave", "--data-dir", str(tmp_path), "--last-days", "36500")
+
+    # ACT
+    options = dsd.resolve_options(arguments)
+
+    # ASSERT
+    assert options.startNight == date(2026, 1, 27) - timedelta(days=36499)
+
+
+def test_last_days_overrides_the_night_settings(tmp_path, currentNight, monkeypatch):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "DEFAULT_START_NIGHT", "2026-02-01")
+    monkeypatch.setattr(dsd, "DEFAULT_END_NIGHT", "2026-02-28")
+    arguments = cli("--user", "dave", "--data-dir", str(tmp_path), "--last-days", "2")
+
+    # ACT
+    options = dsd.resolve_options(arguments)
+
+    # ASSERT
+    assert (options.startNight, options.endNight) == (date(2026, 1, 26), None)
+
+
+def test_current_night_is_a_date():
+    # ACT
+    night = dsd.current_night()
+
+    # ASSERT
+    assert type(night) is date
+
+
+@pytest.mark.parametrize(
+    ("utNow", "expected"),
+    [
+        (datetime(2026, 1, 27, 11, 59, 59), date(2026, 1, 26)),
+        (datetime(2026, 1, 27, 12, 0, 0), date(2026, 1, 27)),
+    ],
+)
+def test_current_night_rolls_over_at_noon_ut(monkeypatch, utNow, expected):
+    # ARRANGE
+    monkeypatch.setattr(dsd, "datetime", make_frozen_datetime(utNow))
+
+    # ACT
+    night = dsd.current_night()
+
+    # ASSERT
+    assert night == expected
+
+
+def test_main_queries_an_open_ended_window_for_last_days(tmp_path, currentNight):
+    # ARRANGE
+    eso = make_eso(make_archive_table([]))
+
+    # ACT
+    run_main(eso, tmp_path, "--last-days", "2")
+
+    # ASSERT
+    eso.query_main.assert_called_once_with(
+        "SOXS",
+        columns=["dp_id", "dp_cat", "date_obs"],
+        authenticated=True,
+        column_filters={"exp_start": ">= '2026-01-26 11:00:00'"},
+    )
+
+
 # ---------------------------------------------------------------- COMMAND LINE (DOCOPT)
 
 
@@ -1800,7 +1941,7 @@ def test_help_flag_prints_the_usage_text_and_exits(monkeypatch, capsys):
     assert "Usage:" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("flags", [["--bogus"], ["--start-night"], ["--user"]])
+@pytest.mark.parametrize("flags", [["--bogus"], ["--start-night"], ["--user"], ["--last-days"]])
 def test_unknown_or_incomplete_flags_are_rejected_by_docopt(monkeypatch, flags):
     # ARRANGE
     monkeypatch.setattr(sys, "argv", ["soxs-data-downloader.py", *flags])
