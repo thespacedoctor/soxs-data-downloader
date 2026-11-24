@@ -3,10 +3,15 @@ name: Tests
 permissions:
   contents: read
 
+# A CHANGE THAT TOUCHES ONLY CHANGES.md SKIPS THIS WORKFLOW
 on:
   push:
     branches: [main, develop]
+    paths-ignore:
+      - "CHANGES.md"
   pull_request:
+    paths-ignore:
+      - "CHANGES.md"
 
 jobs:
   tests:
